@@ -1,0 +1,604 @@
+---
+title: "Practicum2"
+author: "Yang He, Yidan Zhu, Yixing Chen, Zheng Zheng"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+# Part 1
+
+# Schema
+
+![](ERD.jpg)
+
+\# Load packages
+
+```{r}
+library(XML)
+library(RSQLite)
+```
+
+# Prepare for xml and database
+
+```{r}
+fpath <- "/Users/yistarchen/Desktop/Practicum2_v4/pubmed_sample.xml"
+xmlfile <- "pubmed_sample.xml"
+xmlObj <- xmlParse("pubmed_sample.xml")
+```
+
+```{r}
+fpath = ("/Users/yistarchen/Desktop/Practicum2_v4/pubmed_sample.xml")
+dbfile = "practicum2.db"
+dbcon <- dbConnect(RSQLite::SQLite(), "practicum2.db")
+```
+
+# Foreign key
+
+```{sql connection=dbcon}
+PRAGMA foreign_keys = ON;
+```
+
+# Drop tables if exist
+
+```{sql connection=dbcon}
+DROP TABLE IF EXISTS Journal
+```
+
+```{sql connection=dbcon}
+DROP TABLE IF EXISTS Article
+```
+
+```{sql connection=dbcon}
+DROP TABLE IF EXISTS Author
+```
+
+```{sql connection=dbcon}
+DROP TABLE IF EXISTS Author_Article_Relationship
+```
+
+```{sql connection=dbcon}
+DROP TABLE IF EXISTS History
+```
+
+# Create tables
+
+```{sql connection=dbcon}
+CREATE TABLE Journal (
+  ISSN TEXT NOT NULL PRIMARY KEY,
+  Title TEXT
+);
+```
+
+```{sql connection=dbcon}
+CREATE TABLE Article (
+  PMID INT NOT NULL PRIMARY KEY,
+  Title TEXT,
+  ISSN NOT NULL TEXT,
+  FOREIGN KEY (ISSN) REFERENCES Journal(ISSN)
+);
+```
+
+```{sql connection=dbcon}
+CREATE TABLE Author (
+  Author_ID INT NOT NULL PRIMARY KEY,
+  LastName TEXT,
+  ForeName TEXT
+);
+```
+
+```{sql connection=dbcon}
+CREATE TABLE Author_Article_Relationship (
+  Relation_ID INT NOT NULL PRIMARY KEY,
+  PMID INT NOT NULL,
+  Author_ID INT NOT NULL,
+  FOREIGN KEY (PMID) REFERENCES Article(PMID),
+  FOREIGN KEY (Author_ID) REFERENCES Author(Author_ID)
+);
+```
+
+```{sql connection=dbcon}
+CREATE TABLE History (
+  History_ID INT NOT NULL PRIMARY KEY,
+  History_Date DATE,
+  Pub_Status TEXT,
+  PMID INT,
+  FOREIGN KEY (PMID) REFERENCES Article(PMID)
+);
+```
+
+# Load tables
+
+```{r}
+# 1.create journal data frame
+journal_df <- data.frame(
+  ISSN = xpathSApply(xmlObj, "//ISSN", xmlValue),
+  Title = xpathSApply(xmlObj, "//Journal/Title", xmlValue)
+)
+
+# 2.write data to journal
+dbWriteTable(dbcon, "Journal", journal_df, overwrite = TRUE)
+```
+
+```{r}
+PMID = as.integer(xpathSApply(xmlObj,"//MedlineCitation/PMID", xmlValue))
+
+# 1.create article data frame
+article_df <- data.frame(
+  PMID = as.integer(xpathSApply(xmlObj,"//MedlineCitation/PMID", xmlValue)),
+  Title = xpathSApply(xmlObj, "//MedlineCitation/Article/ArticleTitle", xmlValue),
+  ISSN = xpathSApply(xmlObj, "//ISSN", xmlValue)
+)
+
+# 2.write data to article
+dbWriteTable(dbcon, "Article", article_df, overwrite = TRUE)
+```
+
+```{r}
+# 1.create author data frame
+author_df <- data.frame()
+for (i in 1:length(PMID)) {
+  tmp_df <- data.frame(
+    LastName = xpathSApply(xmlObj,  paste0("//MedlineCitation[PMID='", PMID[i], "']/Article/AuthorList/Author/LastName"), xmlValue),
+    ForeName = xpathSApply(xmlObj, paste0("//MedlineCitation[PMID='", PMID[i], "']/Article/AuthorList/Author/ForeName"), xmlValue)
+  )
+  author_df <- rbind(author_df, tmp_df)
+}
+
+
+  ## create a formatted full name column for comparison
+  author_df_formatted <- author_df
+  author_df_formatted$FormattedFullName <- paste(tolower(gsub("-", " ", author_df$LastName)), tolower(gsub("-", " ", author_df$ForeName)))
+
+  ## identify duplicate authors, including "Ya-Lin" "Ya-lin" and "Ya Lin"
+  duplicated_records <- author_df[duplicated(author_df_formatted$FormattedFullName), ]
+
+  ## print duplicate authors
+  print(duplicated_records)
+
+  ## remove duplicate authors
+  unique_author_df <- author_df[!duplicated(author_df_formatted$FormattedFullName), ]
+
+
+# 2.create primary key
+n <- nrow(unique_author_df)
+unique_author_df$Author_ID <- 1:n
+
+# 3.write data to author
+dbWriteTable(dbcon, "Author", unique_author_df, overwrite = TRUE)
+```
+
+```{r}
+author_df 
+```
+
+```{r}
+ unique_author_df 
+```
+
+```{r}
+# 1.create relationship data frame
+author_article_relationship_df <- data.frame()
+for (i in 1:length(PMID)) {
+  authors_LastName <- xpathSApply(xmlObj, paste0("//MedlineCitation[PMID='", PMID[i], "']/Article/AuthorList/Author/LastName"), xmlValue)
+  authors_ForeName <- xpathSApply(xmlObj, paste0("//MedlineCitation[PMID='", PMID[i], "']/Article/AuthorList/Author/ForeName"), xmlValue)
+  
+ ## query author ids
+  author_ids <- match(
+    paste(tolower(gsub("-", " ", authors_LastName)), tolower(gsub("-", " ", authors_ForeName))),
+    paste(tolower(unique_author_df$LastName), tolower(unique_author_df$ForeName))
+  )
+  
+ ## a PMID may relate to multiple history dates
+  pmid_rep <- rep(article_df$PMID[i], length(author_ids))
+  
+  tmp_df <- data.frame(
+    PMID = pmid_rep,
+    Author_ID = author_ids
+  )
+  
+  author_article_relationship_df <- rbind(author_article_relationship_df, tmp_df)
+}
+
+ ## remove duplicate relationships
+author_article_relationship_df <- unique(author_article_relationship_df)
+
+# 2.create primary key
+n <- nrow(author_article_relationship_df)
+author_article_relationship_df$Relation_ID <- 1:n
+
+# 3.write data to relationship
+dbWriteTable(dbcon, "Author_Article_Relationship", author_article_relationship_df, overwrite = TRUE)
+```
+
+```{r}
+# 1.create history data frame
+history_df <- data.frame()
+for (i in 1:length(PMID)) {
+  pmid <- as.integer(xpathSApply(xmlObj, paste("//PubmedArticle[", i, "]/MedlineCitation/PMID"), xmlValue))
+  years <- xpathApply(xmlObj, paste("//PubmedArticle[", i, "]/PubmedData/History/PubMedPubDate/Year"), xmlValue)
+  months <-xpathApply(xmlObj, paste("//PubmedArticle[", i, "]/PubmedData/History/PubMedPubDate/Month"), xmlValue)
+  days <- xpathApply(xmlObj, paste("//PubmedArticle[", i, "]/PubmedData/History/PubMedPubDate/Day"), xmlValue)
+  ## combine year,month,day to date
+  history_dates <- as.Date(paste(years, months, days, sep = "-"))
+  ## one history has multiple pub status
+  pub_status <- xpathSApply(xmlObj, paste("//PubmedArticle[", i, "]/PubmedData/History/PubMedPubDate"), function(node) xmlGetAttr(node, "PubStatus"))
+  
+  ## a PMID may relate to multiple history dates
+  pmid_rep <- rep(pmid, length(history_dates))
+  
+  tmp_df <- data.frame(
+    PMID = pmid_rep,
+    History_Date = history_dates,
+    Pub_Status = pub_status
+  )
+  
+  history_df <- rbind(history_df, tmp_df)
+}
+
+# 2.create primary key
+n <- nrow(history_df)
+history_df$History_ID <- 1:n
+
+# 3.write data to history
+dbWriteTable(dbcon, "History", history_df, overwrite = TRUE)
+```
+
+```{r}
+history_df
+```
+
+# Select data from tables
+
+```{sql connection=dbcon}
+SELECT * FROM Journal
+```
+
+```{sql connection=dbcon}
+SELECT * FROM Article
+```
+
+```{sql connection=dbcon}
+SELECT * FROM Author
+```
+
+```{sql connection=dbcon}
+SELECT * FROM Author_Article_Relationship
+```
+
+```{sql connection=dbcon}
+SELECT * FROM History
+```
+
+# Part 2
+
+1\.
+
+(2*0 pts*) Create and populate a star schema with dimension and transaction fact tables. Each row in the fact table will represent one article fact. Include the image of an updated relational schema that contains the fact table and any additional required dimension tables (as well as the summary fact table from the next task). Populate the star schema either by drawing data from the previous database or re-importing it from R. When building the schema, look a head to Part 3 as the schema is dependent on the eventual OLAP queries. -Zheng Zheng
+
+2.1.1 The Star Schema
+
+![](Star%20Schema%20with%20Summary%20Fact%20Table.png)
+
+2.1.2
+
+### **Database Schema Creation**
+
+```{r}
+library(DBI)
+library(RSQLite)
+library(dplyr)
+library(tidyverse)
+
+
+# Connect to SQLite Database
+conn <- dbConnect(RSQLite::SQLite(), dbname = "starschema.sqlite")
+
+# Enable foreign key constraint enforcement
+dbExecute(conn, "PRAGMA foreign_keys = ON")
+
+# Drop existing tables if they exist
+dbExecute(conn, "DROP TABLE IF EXISTS Article")
+dbExecute(conn, "DROP TABLE IF EXISTS Journal")
+dbExecute(conn, "DROP TABLE IF EXISTS Author")
+dbExecute(conn, "DROP TABLE IF EXISTS Publishstatus")
+
+# Create tables with foreign key constraints
+dbExecute(conn, "CREATE TABLE Journal (
+    journal_issn TEXT NOT NULL PRIMARY KEY,
+    journal_title TEXT
+)")
+
+dbExecute(conn, "CREATE TABLE Author (
+    author_id INTEGER NOT NULL PRIMARY KEY,
+    last_name TEXT,
+    fore_name TEXT
+)")
+
+dbExecute(conn, "CREATE TABLE Publishstatus (
+    publishstatus_id INTEGER NOT NULL PRIMARY KEY,
+    publishstatus TEXT,
+    pub_date DATE,
+    pub_day_of_week TEXT,
+    pub_quarter_of_year INTEGER,
+    pub_year_num INTEGER
+)")
+
+dbExecute(conn, "CREATE TABLE Article (
+    pm_id INTEGER NOT NULL,
+    article_title TEXT,
+    journal_issn TEXT NOT NULL,
+    author_id INTEGER NOT NULL,
+    publishstatus_id INTEGER NOT NULL,
+    FOREIGN KEY (journal_issn) REFERENCES Journal (journal_issn),
+    FOREIGN KEY (author_id) REFERENCES Author (author_id),
+    FOREIGN KEY (publishstatus_id) REFERENCES Publishstatus (publishstatus_id)
+)")
+
+
+```
+
+2.  Loading data
+
+```{r}
+dbcon <- dbConnect(RSQLite::SQLite(), dbname = "practicum2.db")
+```
+
+```{r}
+# Query data from each table
+journal_data <- dbGetQuery(dbcon, "SELECT * FROM Journal")
+article_data <- dbGetQuery(dbcon, "SELECT * FROM Article")
+author_data <- dbGetQuery(dbcon, "SELECT * FROM Author")
+author_article_data <- dbGetQuery(dbcon, "SELECT * FROM Author_Article_Relationship")
+history_data <- dbGetQuery(dbcon, "SELECT * FROM History")
+
+```
+
+```{r}
+journal_data_new <- journal_data %>%
+  rename(
+    journal_issn = ISSN,
+    journal_title = Title
+  )%>% distinct()
+
+author_data_new <- author_data %>%
+  rename(
+    author_id = Author_ID,
+    last_name = LastName,
+    fore_name = ForeName
+  )%>% distinct()
+
+```
+
+```{r}
+library(lubridate)
+library(dplyr)
+
+publishstatus_data <- history_data %>%
+  mutate(
+    publishstatus_id = History_ID,
+    publishstatus = Pub_Status,
+    pub_date = as.Date(History_Date, origin = "1970-01-01"),
+    pub_day_of_week = wday(pub_date, label = TRUE),
+    pub_quarter_of_year = quarter(pub_date),
+    pub_year_num = year(pub_date)
+  ) %>%
+  select(publishstatus_id, publishstatus, pub_date, pub_day_of_week, pub_quarter_of_year, pub_year_num)%>% distinct()
+
+```
+
+```{r}
+publishstatus_data
+```
+
+```{r}
+# Join Article with Author_Article_Relationship and History
+article_combined_data <- article_data %>%
+  left_join(author_article_data, by = "PMID") %>%
+  left_join(author_data, by = "Author_ID")%>%
+  left_join(history_data, by = "PMID") %>%
+  mutate(
+    pm_id = PMID,
+    article_title = Title,
+    journal_issn = ISSN,
+    author_id = Author_ID,
+    publishstatus_id = History_ID
+  ) %>%
+  select(pm_id, article_title, journal_issn, author_id, publishstatus_id)
+
+# Removing duplicate rows if needed
+article_combined_data <- article_combined_data %>% distinct()
+
+```
+
+```{r}
+head(article_combined_data)
+```
+
+```{r}
+# Insert adjusted data into new tables
+dbWriteTable(conn, "Journal", journal_data_new, row.names = FALSE, append = TRUE)
+dbWriteTable(conn, "Author", author_data_new, row.names = FALSE, append = TRUE)
+dbWriteTable(conn, "Publishstatus", publishstatus_data, row.names = FALSE, append = TRUE)
+dbWriteTable(conn, "Article", article_combined_data, row.names = FALSE, append = TRUE)
+
+# Close database connections
+dbDisconnect(dbcon)
+dbDisconnect(conn)
+```
+
+2.2 In the same schema as the previous step, create and populate a summary fact table that represents number of articles per time period (quarter, year) by author and by journal. Include this summary fact table in the updated relational schema from the previous task. Populate the fact table using the data from the star schema. When building the schema, look a head to Part 3 as the schema is dependent on the eventual OLAP queries. -- Yang He
+
+2.2.1 create the fact table
+
+```{r}
+conn <- dbConnect(RSQLite::SQLite(), dbname = "starschema.sqlite")
+```
+
+```{sql connection=conn}
+PRAGMA foreign_keys = ON;
+```
+
+```{sql connection=conn}
+DROP TABLE IF EXISTS ArticleSummaryFact
+```
+
+```{sql connection=conn}
+CREATE TABLE ArticleSummaryFact (
+    pm_id Integer NOT NULL,
+    author_id Integer NOT NULL,
+    journal_issn Text NOT NULL,
+    quarter_of_year Integer,
+    year_num Integer,
+    day_of_week Integer
+);
+```
+
+2.2.2 load the table
+
+```{sql connection=conn}
+INSERT INTO ArticleSummaryFact (pm_id, author_id, journal_issn, quarter_of_year, year_num, day_of_week)
+SELECT
+    a.pm_id,
+    a.author_id,
+    a.journal_issn,
+    p.pub_quarter_of_year,
+    p.pub_year_num,
+    p.pub_day_of_week
+    
+FROM Article a
+JOIN Publishstatus p ON a.publishstatus_id = p.publishstatus_id
+WHERE p.publishstatus = "entrez"
+```
+
+```{sql connection=conn}
+SELECT * From ArticleSummaryFact
+```
+
+2.2.3 show a summary that represents number of articles per time period (quarter, year) by author
+
+```{sql connection=conn}
+SELECT year_num, quarter_of_year, author_id, COUNT(*) AS num_articles
+FROM ArticleSummaryFact
+GROUP BY year_num, quarter_of_year, author_id;
+```
+
+show a summary that represents number of articles per time period (quarter, year) by journal
+
+```{sql connection=conn}
+SELECT year_num, quarter_of_year, journal_issn, COUNT(*) AS num_articles
+FROM ArticleSummaryFact
+GROUP BY year_num, quarter_of_year, journal_issn;
+```
+
+Part 3 Explore and Mine Data-Yixing Chen (20 pts) Write queries using your data warehouse to explore whether the publications show a seasonal pattern. For example, create a line graph that shows the number of publications for all journals each quarter or the average number of days between submission and publication. If necessary, adjust your fact table(s) as needed to support your new queries. If you need to update the fact table, document your changes and your reasons why the changes are needed.
+
+3.1 a line graph that shows the number of publications for all journals each quarter
+
+```{sql connection=conn}
+#SQL query to select and count the number of articles per quarter
+SELECT year_num, quarter_of_year, COUNT(DISTINCT(pm_id)) AS num_articles
+FROM ArticleSummaryFact
+GROUP BY year_num, quarter_of_year
+ORDER BY year_num, quarter_of_year;
+```
+
+```{r}
+library(ggplot2)
+
+# Execute the SQL query to retrieve the data to select and count the number of articles per quarter
+query <- "SELECT year_num, quarter_of_year, COUNT(DISTINCT(pm_id)) AS num_articles
+          FROM ArticleSummaryFact
+          GROUP BY year_num, quarter_of_year
+          ORDER BY year_num, quarter_of_year;"
+
+data <- dbGetQuery(conn, query)
+
+# Create the line graph showing the number of publications per quarter for all journals
+ggplot(data, aes(x = quarter_of_year, y = num_articles, group = year_num, color = as.factor(year_num))) +
+  geom_line() + # Add line elements to the plot for each year
+  geom_point() + # Add point elements to the plot to highlight individual data points
+  labs(title = "Number of Publications per Quarter for All Journals", # Add a title to the plot
+       x = "Quarter", # Label for the x-axis
+       y = "Number of Publications") +  # Label for the y-axis
+  scale_x_continuous(breaks = 1:4, labels = c("Q1", "Q2", "Q3", "Q4")) + # Customize the x-axis to show quarters
+  theme_minimal()  
+
+```
+
+3.2 Count of 'pubmed' Occurrences by Day of the Week
+
+```{sql connection=conn}
+SELECT day_of_week,  -- Selecting the day of the week
+  COUNT(DISTINCT(pm_id)) AS pubmed_count -- Counting the number of publications
+  FROM
+    ArticleSummaryFact   -- From the 'ArticleSummaryFact' table
+GROUP BY day_of_week     -- Grouping the results by the day of the week
+```
+
+```{r}
+library(ggplot2)
+# SQL query for retrieving count of publications by day of the week
+query <- "
+SELECT
+    day_of_week,   -- Selecting the day of the week
+    COUNT(DISTINCT(pm_id)) AS pubmed_count   -- Counting the number of publications
+FROM
+    ArticleSummaryFact    -- From the 'ArticleSummaryFact' table
+GROUP BY day_of_week       -- Grouping the results by the day of the week
+"
+
+result <- dbGetQuery(conn, query)
+
+# Create a bar graph showing the count of 'pubmed' occurrences by day of the week
+ggplot(result, aes(x = day_of_week, y = pubmed_count)) +
+  geom_bar(stat = "identity", fill = "skyblue", color = "black") +   
+  labs(title = "Count of 'pubmed' Occurrences by Day of the Week",    
+       x = "Day of the Week",  
+       y = "Count") + 
+  theme_minimal()
+
+```
+
+3.3 the average number of days between submission and publication.
+
+```{r}
+# Retrieve data from Publishstatus and Article tables
+status_data <- dbGetQuery(conn, "SELECT * FROM Publishstatus")
+article_data <- dbGetQuery(conn, "SELECT * FROM Article")
+
+# Combine data from both tables
+combined_data <- article_data %>%
+  left_join(status_data, by = "publishstatus_id")
+combined_data
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+# Reshape the data to prepare for gap calculation
+reshaped_data <- combined_data %>%
+  # Group by 'pm_id' and 'publishstatus' to ensure unique combinations
+  group_by(pm_id, publishstatus) %>%
+  summarize(pub_date = first(pub_date), .groups = "drop") %>%
+  # Spread the data into a wider format
+  pivot_wider(
+    names_from = publishstatus,  # Column names from 'publishstatus'
+    values_from = pub_date,      # Values in the cells from 'pub_date'
+    id_cols = pm_id              # Keeping 'pm_id' as the identifier
+  )
+
+# Convert the columns to Date format if they are not already
+reshaped_data$entrez <- as.Date(reshaped_data$entrez, origin = "1970-01-01")
+reshaped_data$received <- as.Date(reshaped_data$received, origin = "1970-01-01")
+
+# Calculate the gap, setting it to NA if either date is NA
+reshaped_data$gap <- ifelse(
+  is.na(reshaped_data$entrez) | is.na(reshaped_data$received), 
+  NA, 
+  as.numeric(reshaped_data$entrez - reshaped_data$received)
+)
+# Calculate the average gap across all articles, ignoring missing values
+average_gap <- mean(reshaped_data$gap, na.rm = TRUE)
+average_gap
+```
